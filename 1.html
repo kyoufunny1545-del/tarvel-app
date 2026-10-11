@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>行きたい場所集約（Firebase Firestore版）</title>
+  <style>
+    body { font-family: sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; }
+    form { background-color: #f5f5f5; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+    .form-group { margin-bottom: 15px; }
+    label { display: block; margin-bottom: 5px; font-weight: bold; }
+    input[type="text"] { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+    .spot-group { display: flex; gap: 10px; margin-bottom: 8px; }
+    .spot-group input { flex: 1; }
+    button { border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; color: white; }
+    .btn-submit { background-color: #007bff; width: 100%; font-size: 16px; margin-top: 10px; }
+    .btn-add { background-color: #17a2b8; margin-bottom: 10px; }
+    .btn-remove { background-color: #6c757d; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+    th { background-color: #f2f2f2; }
+    .status { margin-top: 10px; font-weight: bold; color: green; text-align: center; }
+
+    /* 操作ボタン用のスタイル */
+    .action-btns { display: flex; gap: 5px; }
+    .btn-edit { background-color: #ffc107; color: #333; padding: 5px 10px; }
+    .btn-delete { background-color: #dc3545; padding: 5px 10px; }
+    .btn-cancel { background-color: #6c757d; display: none; margin-top: 5px; width: 100%; }
+  </style>
+</head>
+<body>
+
+  <h1 id="formTitle">行きたい場所の登録（クラウド集約）</h1>
+
+  <form id="travelForm">
+    <!-- 編集時にドキュメントIDを保持する非表示フィールド -->
+    <input type="hidden" id="editDocId" value="">
+
+    <div class="form-group">
+      <label for="name">名前：</label>
+      <input type="text" id="name" placeholder="例：山田太郎" required>
+    </div>
+
+    <div class="form-group">
+      <label for="location">行きたい場所（県）：</label>
+      <input type="text" id="location" placeholder="例：北海道" required>
+    </div>
+
+    <div class="form-group">
+      <label>観光地：</label>
+      <div id="spotsContainer">
+        <div class="spot-group">
+          <input type="text" class="spot-input" placeholder="例：函館山" required>
+        </div>
+      </div>
+      <button type="button" id="addSpotBtn" class="btn-add">＋ 観光地を追加</button>
+    </div>
+
+    <button type="submit" id="submitBtn" class="btn-submit">クラウドに送信して登録</button>
+    <button type="button" id="cancelEditBtn" class="btn-cancel">編集をキャンセル</button>
+    <div id="statusMessage" class="status"></div>
+  </form>
+
+  <h2>クラウド集約データ一覧（リアルタイム更新）</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>名前</th>
+        <th>行きたい場所（県）</th>
+        <th>観光地</th>
+        <th>送信日時</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="tableBody">
+      <tr><td colspan="5" style="text-align:center;">データを読み込み中...</td></tr>
+    </tbody>
+  </table>
+
+  <!-- Firebase SDK (v10) の読み込み -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-app.js";
+    import { 
+      getFirestore, 
+      collection, 
+      addDoc, 
+      doc,
+      updateDoc,
+      deleteDoc,
+      onSnapshot, 
+      query, 
+      orderBy, 
+      serverTimestamp 
+    } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-firestore.js";
+
+    // Firebase設定情報
+    const firebaseConfig = {
+      apiKey: "AIzaSyAiZRH9t8uMQpLVVSX9lJOtDRuUMscb56s",
+      authDomain: "syuyaku-f3c98.firebaseapp.com",
+      projectId: "syuyaku-f3c98",
+      storageBucket: "syuyaku-f3c98.firebasestorage.app",
+      messagingSenderId: "734518989942",
+      appId: "1:734518989942:web:3d929bbdcbfebe31b73b57",
+      measurementId: "G-XW8B6NE7MK"
+    };
+
+    // 初期化
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // DOM要素
+    const form = document.getElementById('travelForm');
+    const formTitle = document.getElementById('formTitle');
+    const submitBtn = document.getElementById('submitBtn');
+    const cancelEditBtn = document.getElementById('cancelEditBtn');
+    const editDocIdInput = document.getElementById('editDocId');
+    const spotsContainer = document.getElementById('spotsContainer');
+    const addSpotBtn = document.getElementById('addSpotBtn');
+    const tableBody = document.getElementById('tableBody');
+    const statusMessage = document.getElementById('statusMessage');
+
+    // 観光地入力欄を追加する処理
+    function createSpotInput(value = '') {
+      const group = document.createElement('div');
+      group.className = 'spot-group';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'spot-input';
+      input.placeholder = '例：大通公園';
+      input.value = value;
+
+      if (spotsContainer.children.length > 0) {
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'btn-remove';
+        removeBtn.textContent = '削除';
+        removeBtn.onclick = () => group.remove();
+        group.append(input, removeBtn);
+      } else {
+        input.required = true;
+        group.appendChild(input);
+      }
+
+      spotsContainer.appendChild(group);
+    }
+
+    addSpotBtn.addEventListener('click', () => createSpotInput());
+
+    // フォームを初期状態に戻す処理
+    function resetForm() {
+      form.reset();
+      editDocIdInput.value = '';
+      formTitle.textContent = '行きたい場所の登録（クラウド集約）';
+      submitBtn.textContent = 'クラウドに送信して登録';
+      submitBtn.style.backgroundColor = '#007bff';
+      cancelEditBtn.style.display = 'none';
+      spotsContainer.innerHTML = '';
+      createSpotInput();
+    }
+
+    cancelEditBtn.addEventListener('click', resetForm);
+
+    // 送信（新規追加 or 更新）
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const docId = editDocIdInput.value;
+      const name = document.getElementById('name').value;
+      const location = document.getElementById('location').value;
+      const spots = Array.from(document.querySelectorAll('.spot-input'))
+        .map(i => i.value.trim())
+        .filter(v => v !== '');
+
+      try {
+        statusMessage.textContent = docId ? '更新中...' : '送信中...';
+
+        if (docId) {
+          // --- 更新処理 (updateDoc) ---
+          const docRef = doc(db, "travels", docId);
+          await updateDoc(docRef, {
+            name: name,
+            location: location,
+            spots: spots
+          });
+          statusMessage.textContent = '更新が完了しました！';
+        } else {
+          // --- 新規追加処理 (addDoc) ---
+          await addDoc(collection(db, "travels"), {
+            name: name,
+            location: location,
+            spots: spots,
+            createdAt: serverTimestamp()
+          });
+          statusMessage.textContent = '送信が完了しました！';
+        }
+
+        setTimeout(() => statusMessage.textContent = '', 3000);
+        resetForm();
+
+      } catch (error) {
+        console.error("エラー:", error);
+        alert("操作に失敗しました: " + error.message);
+        statusMessage.textContent = '';
+      }
+    });
+
+    // リアルタイム読み込みとテーブル描画
+    const q = query(collection(db, "travels"), orderBy("createdAt", "desc"));
+
+    onSnapshot(q, (snapshot) => {
+      tableBody.innerHTML = '';
+
+      if (snapshot.empty) {
+        tableBody.innerHTML = '<tr><td colspan="5" style="text-align:center;">まだデータがありません</td></tr>';
+        return;
+      }
+
+      snapshot.forEach((docSnapshot) => {
+        const item = docSnapshot.data();
+        const docId = docSnapshot.id; // 各データのユニークID
+        const row = document.createElement('tr');
+
+        let dateStr = '送信中...';
+        if (item.createdAt) {
+          dateStr = item.createdAt.toDate().toLocaleString('ja-JP');
+        }
+
+        const spotsArray = Array.isArray(item.spots) ? item.spots : [item.spots];
+        const spotsText = spotsArray.join('、');
+
+        row.innerHTML = `
+          <td>${item.name}</td>
+          <td>${item.location}</td>
+          <td>${spotsText}</td>
+          <td>${dateStr}</td>
+          <td>
+            <div class="action-btns">
+              <button type="button" class="btn-edit" data-id="${docId}">編集</button>
+              <button type="button" class="btn-delete" data-id="${docId}">削除</button>
+            </div>
+          </td>
+        `;
+
+        // 編集ボタンの処理
+        row.querySelector('.btn-edit').addEventListener('click', () => {
+          editDocIdInput.value = docId;
+          document.getElementById('name').value = item.name;
+          document.getElementById('location').value = item.location;
+
+          // 観光地入力欄の再構築
+          spotsContainer.innerHTML = '';
+          spotsArray.forEach(spot => createSpotInput(spot));
+
+          // フォーム表示を変更
+          formTitle.textContent = '登録データの編集';
+          submitBtn.textContent = '変更を保存する';
+          submitBtn.style.backgroundColor = '#28a745';
+          cancelEditBtn.style.display = 'block';
+
+          // フォームへスクロール
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+
+        // 削除ボタンの処理 (deleteDoc)
+        row.querySelector('.btn-delete').addEventListener('click', async () => {
+          if (confirm(`「${item.name}」さんのデータを削除してもよろしいですか？`)) {
+            try {
+              await deleteDoc(doc(db, "travels", docId));
+              statusMessage.textContent = '削除しました';
+              setTimeout(() => statusMessage.textContent = '', 3000);
+            } catch (err) {
+              alert('削除に失敗しました: ' + err.message);
+            }
+          }
+        });
+
+        tableBody.appendChild(row);
+      });
+    });
+  </script>
+</body>
+</html>
